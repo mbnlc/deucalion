@@ -77,3 +77,13 @@ class Strategy:
 		
 ```
 
+
+-----
+
+## Backtesting and Simulation
+
+For the MVP version of Deucalion we focus on backtesting functionality as proof of concept. This will be achieved by building relevant classes within the three system design layers to imitate live data injection. Functionality is split in two relevant classes: the Simulator and BacktestingEngine.
+
+The **Simulator** is a client subclass used to simulate historical data by adhering to a state simulated clock. A Simulator instance takes a **SimulatedClock** instance and a timestamp indexed dataset as a pandas data frame. As we progress the simulated clock in the desired interval, simulators will emit the most recent datapoint from their dataset via callback function. We can instantiate separate simulators for different datasets using the same simulated clock.
+
+The **BacktestingEngine** is an Engine subclass implementing standard functionality, however also simulating broker order execution according to specified config (In the future, we may consider a local LOB instance utilizing L2 data).   

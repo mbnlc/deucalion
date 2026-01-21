@@ -84,8 +84,8 @@ class Simulator(Client):
         clock: The SimulatedClock instance that controls time progression.
         data: A pandas DataFrame with datetime index containing price data.
               Columns should represent contract_id (ticker symbols).
-        current_data: DataFrame containing only data up to current time.
         subscribers: Dictionary mapping event types to lists of callbacks.
+        last_packet: Most recent DataFrame of newly emitted rows (may be None).
     
     Example:
         >>> import pandas as pd
@@ -94,6 +94,7 @@ class Simulator(Client):
         >>> clock = SimulatedClock(dt.datetime(2024, 1, 1), 86400)
         >>> simulator = Simulator(clock, data)
         >>> simulator.subscribe('tick', my_strategy.on_tick)
+        >>> # my_strategy.on_tick receives (current_time, packet_df)
     """
 
     def __init__(self, clock: SimulatedClock, data: pd.DataFrame):
@@ -120,11 +121,15 @@ class Simulator(Client):
         # Ensure data is sorted by time
         self.data = data.sort_index()
         self.clock = clock
-        self.subscribers = {}  # Dictionary: event_type -> list of callbacks
-        
-        # Initialize current_data with data up to start_date
-        self.current_data = self.data.loc[self.data.index <= self.clock.current_time]
-        
+        self.subscribers: dict[str, list] = {}
+        self._last_emitted_time: dt.datetime | None = None
+        self._last_packet: pd.DataFrame | None = None
+
+        initial_window = self.data.loc[self.data.index <= self.clock.current_time]
+        if not initial_window.empty:
+            self._last_emitted_time = initial_window.index[-1]
+            self._last_packet = initial_window.copy()
+
         # Subscribe to clock ticks
         self.clock.subscribe(self._on_tick)
 
@@ -132,20 +137,22 @@ class Simulator(Client):
         """
         Internal callback method called when the clock advances.
         
-        This method filters the data to include only points up to and including
-        the current time, then notifies subscribers of new data.
+        This method extracts any newly available rows since the last tick and
+        notifies subscribers with the corresponding data packet.
         
         Args:
             current_time: The current simulated time from the clock.
         """
-        # Filter data to include only points up to current time (no look-ahead)
-        mask = self.data.index <= current_time
-        self.current_data = self.data.loc[mask]
-        
-        # Notify subscribers of the tick event
-        if 'tick' in self.subscribers:
-            for callback in self.subscribers['tick']:
-                callback(current_time)
+        packet = self._extract_new_data(current_time)
+        if packet.empty:
+            return
+
+        self._last_emitted_time = packet.index[-1]
+        self._last_packet = packet.copy()
+
+        if "tick" in self.subscribers:
+            for callback in self.subscribers["tick"]:
+                callback(current_time, packet.copy())
 
     def subscribe(self, event_type: str, callback):
         """
@@ -154,7 +161,8 @@ class Simulator(Client):
         Args:
             event_type: Type of event to subscribe to (e.g., 'tick').
             callback: Callable function to be called when the event occurs.
-                     For 'tick' events, the callback receives the current datetime.
+                     For 'tick' events, the callback receives the current datetime
+                     and a pandas DataFrame containing any newly available rows.
         """
         if event_type not in self.subscribers:
             self.subscribers[event_type] = []
@@ -162,37 +170,41 @@ class Simulator(Client):
         if callback not in self.subscribers[event_type]:
             self.subscribers[event_type].append(callback)
 
-    def get_price(self, contract_id: str) -> float:
+    def get_data_upto(self, current_time: dt.datetime | None = None) -> pd.DataFrame:
         """
-        Get the current price for a given contract.
-        
-        Returns the most recent available price for the contract_id,
-        based on the current simulated time. Only returns data that
-        has been "emitted" up to the current time (no look-ahead bias).
-        
+        Return all available data up to the specified time.
+
         Args:
-            contract_id: The ticker symbol or contract identifier.
-        
+            current_time: Upper bound for the returned data. If omitted,
+                the last emitted timestamp is used.
+
         Returns:
-            The most recent price for the contract as a float.
-        
+            DataFrame containing rows up to and including the requested time.
+
         Raises:
-            KeyError: If contract_id is not found in the data.
-            ValueError: If no data is available up to the current time.
+            ValueError: If no data has been emitted and no time is provided.
         """
-        if contract_id not in self.data.columns:
-            raise KeyError(f"Contract '{contract_id}' not found in data")
-        
-        if self.current_data.empty:
-            raise ValueError("No data available for current time")
-        
-        # Get the latest available price for this contract
-        if contract_id in self.current_data.columns:
-            # Get the last non-null value
-            series = self.current_data[contract_id].dropna()
-            if series.empty:
-                raise ValueError(f"No price data available for '{contract_id}' at current time")
-            return float(series.iloc[-1])
+        if current_time is None:
+            if self._last_emitted_time is None:
+                raise ValueError("No data has been emitted yet.")
+            current_time = self._last_emitted_time
+
+        return self.data.loc[self.data.index <= current_time].copy()
+
+    @property
+    def last_packet(self) -> pd.DataFrame | None:
+        """Return the most recent data packet emitted by the simulator."""
+        if self._last_packet is None:
+            return None
+        return self._last_packet.copy()
+
+    def _extract_new_data(self, current_time: dt.datetime) -> pd.DataFrame:
+        """Internal helper to retrieve newly accessible data."""
+        if self._last_emitted_time is None:
+            mask = self.data.index <= current_time
         else:
-            raise KeyError(f"Contract '{contract_id}' not found in current data")
+            mask = (self.data.index > self._last_emitted_time) & (
+                self.data.index <= current_time
+            )
+        return self.data.loc[mask]
     
